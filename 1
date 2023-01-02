@@ -1,0 +1,471 @@
+#include <stdlib.h>
+#include "string.h"
+#include "fu.h"
+#include "pipeline.h"
+int
+commit(state_t *state, int*num1 ) {
+       int imm_d;
+       int instr = state->ROB[state->ROB_head].instr;
+       const op_info_t *op_info = decode_instr(instr, &imm_d);
+       int temp_IQ_head = state->IQ_head;
+       int temp_CQ_head = state->CQ_head;
+       if (state->ROB[state->ROB_head].completed == TRUE && instr != 0){
+          switch(op_info->fu_group_num){
+                case FU_GROUP_INT:
+                                 state->rf_int.reg_int.integer[FIELD_RD(instr)].wu = state->ROB[state->ROB_head].result.integer.wu; 
+                                 if (state->rf_int.tag[FIELD_RD(instr)] == state->ROB_head){
+                                    state->rf_int.tag[FIELD_RD(instr)] = -1;
+                                 }                            
+                                 *num1 = *num1 + 1;
+                                 break;
+                case FU_GROUP_MEM:
+                                 switch(op_info->operation){
+                                       case OPERATION_STORE:
+                                                     *num1 = *num1 + 1;
+                                                     //if(state->CQ[state->CQ_head].tag1 == -1 && state->CQ[state->CQ_head].tag2 == -1){
+                                                       if (issue_fu_mem(state->fu_mem_list, state-> ROB_head,  0, 1) != -1){
+                                                          memcpy(&(state->mem[state->ROB[state->ROB_head].target.integer.wu]), 
+                                                                  &(state->rf_int.reg_int.integer[FIELD_RS1(instr)].wu), 4);
+                                                          break;  
+                                                       }
+                                                     //} 
+                                            break;                       
+
+                                       case OPERATION_LOAD:
+                                            *num1 = *num1 + 1;
+                                            switch(op_info->data_type){ 
+                                                  case DATA_TYPE_W: 
+                                		       if (state->rf_int.tag[FIELD_RD(instr)] == state->ROB_head){
+                                                          state->rf_int.tag[FIELD_RD(instr)] = -1;
+                                                          memcpy(&(state->rf_int.reg_int.integer[FIELD_RD(instr)].wu),
+                                                                 &(state->mem[state->ROB[state->ROB_head].target.integer.wu]), 4);
+                                                       }                                                    
+                                                       break;
+                                                  default: break;
+                                            }
+                                            break;  // break from operation case                                
+                                 }                                      
+                                 break;
+                case FU_GROUP_HALT: state->halt = 1;
+                                    *num1 = *num1 + 1;
+                                    break;
+
+            } // closed brackets for op_info->fu_group_num
+
+               state->ROB_head = (state->ROB_head + 1)%64;
+        }  // closed brackets for if      
+}  // closed brackets for commit
+
+void
+writeback(state_t *state) {
+ 
+     int imm_d,instr;
+     const op_info_t *op_info;
+     int i;
+     int temp_CQ_head, temp_IQ_head;
+
+    for (i = 0 ; i <= 1; i++){ 
+       if (state->wb_port_int[i].tag != -1){
+       instr = state->ROB[state->wb_port_int[i].tag].instr; 
+        
+       temp_IQ_head = state->IQ_head;
+       temp_CQ_head = state->CQ_head;   
+       op_info = decode_instr(instr, &imm_d);
+       switch(op_info->fu_group_num){
+             case FU_GROUP_INT: 
+                       state->ROB[state->wb_port_int[i].tag].completed = TRUE;  
+                       while(temp_IQ_head != state->IQ_tail + 1){
+                              if (FIELD_RS1(state->IQ[temp_IQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)) {                                                                    state->IQ[temp_IQ_head].tag1 = -1;
+                                  state->IQ[temp_IQ_head].operand1.integer.wu = state->ROB[state->ROB_head].result.integer.wu;
+                              }
+                              if (FIELD_RS2(state->IQ[temp_IQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){  
+                                 state->IQ[temp_IQ_head].tag2 = -1;
+                                 state->IQ[temp_IQ_head].operand2.integer.wu = state->ROB[state->ROB_head].result.integer.wu;
+                              }
+                              temp_IQ_head = (temp_IQ_head + 1)%32;
+                       }
+                       while(temp_CQ_head != state->CQ_tail + 1){
+                             switch(state->CQ[temp_CQ_head].store){
+                                    case 0:
+                                          if (FIELD_RS1(state->CQ[temp_CQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                             state->CQ[temp_CQ_head].tag1 = -1;
+                                             // write CQ_address at position temp_CQ_head
+                                             state->CQ[temp_CQ_head].address = state->ROB[state->wb_port_int[i].tag].target;
+                                          }
+                                          break;
+                                    case 1:
+                                          if (FIELD_RS1(state->CQ[temp_CQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                             state->CQ[temp_CQ_head].tag1 = -1;
+                                             // write CQ_address at position temp_CQ_head
+                                             state->CQ[temp_CQ_head].address = state->ROB[state->wb_port_int[i].tag].target;
+                                          }
+                                          if (FIELD_RS2(state->CQ[temp_CQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                             state->CQ[temp_CQ_head].tag2 = -1;
+                                             // write CQ_result at position temp_CQ_head
+                                             state->CQ[temp_CQ_head].result = state->ROB[state->wb_port_int[i].tag].target;
+                                          }
+                                          break;
+                             } 
+                             temp_CQ_head = (temp_CQ_head + 1)%32;
+                       }                        
+                       break;
+
+             case FU_GROUP_MEM: 
+              switch (op_info->operation) { 
+               case OPERATION_LOAD: 
+                                 while(temp_IQ_head != state->IQ_tail + 1){
+                                         if (FIELD_RS1(state->IQ[temp_IQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                                 state->IQ[temp_IQ_head].tag1 = -1;
+                                                 state->IQ[temp_IQ_head].operand1.integer.wu = state->ROB[state->ROB_head].result.integer.wu;
+                                         }
+                                         if (FIELD_RS2(state->IQ[temp_IQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                                 state->IQ[temp_IQ_head].tag2 = -1;
+                                                 state->IQ[temp_IQ_head].operand1.integer.wu = state->ROB[state->ROB_head].result.integer.wu;
+                                         }
+                                         temp_IQ_head = (temp_IQ_head + 1)%32;
+                                 }
+                                 while(temp_CQ_head != state->CQ_tail + 1){
+                                          switch(state->CQ[temp_CQ_head].store){
+                                                case 0:
+                                                      if (FIELD_RS1(state->CQ[temp_CQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                                         state->CQ[temp_CQ_head].tag1 = -1;
+                                                      }
+                                                      break;
+                                                case 1:
+                                                      if (FIELD_RS1(state->CQ[temp_CQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                                         state->CQ[temp_CQ_head].tag1 = -1;
+                                                      }
+                                                      if (FIELD_RS2(state->CQ[temp_CQ_head].instr) == FIELD_RD(state->ROB[state->wb_port_int[i].tag].instr)){
+                                                         state->CQ[temp_CQ_head].tag1 = -1;
+                                                      }
+                                                      break;
+                                          }
+                                          temp_CQ_head = (temp_CQ_head + 1)%32;
+                                 }
+                                 break; 
+               case OPERATION_STORE: 
+                                      break;
+                                
+              default: break;                          
+            } // case FU_GROUP_MEM 
+            break;                                 
+           
+          default: break;
+       }//switch fu_group_mem 
+       state->wb_port_int[i].tag = -1;
+       }// if
+       
+    }// for 
+}// function
+
+void
+execute(state_t *state) {        
+    advance_fu_int(state->fu_int_list, state->wb_port_int, 2, &(state->branch_tag));
+    advance_fu_mem(state->fu_mem_list, state->wb_port_int, 2, state->wb_port_fp, 2);
+}
+
+int
+memory_disambiguation(state_t *state) {
+   int temp_CQ_head = state->CQ_head;
+   int temp_CQ_tail = state->CQ_tail;
+   int invalid = 0, store_invalid = 0, load_invalid = 0;
+   while (temp_CQ_head != state->CQ_tail + 1 && invalid == 0 && store_invalid == 0 && load_invalid == 0){ 
+     int instr = state->CQ[temp_CQ_head].instr;
+     int imm_d;
+     const op_info_t *op_info = decode_instr(instr, &imm_d);
+     switch (state->CQ[temp_CQ_head].store){
+          case 1:
+                         if(state->CQ[temp_CQ_head].tag1 == -1 && state->CQ[temp_CQ_head].tag2 == -1) { 
+                           state->CQ[temp_CQ_head].issued = TRUE;
+                           // set completed  = TRUE in rob
+                           state->ROB[state->CQ[temp_CQ_head].ROB_index].completed = TRUE; 
+                           // dont write memory until commit
+                           // write result from register in CQ_result at IQ_rob_index
+                           state->ROB[state->CQ[temp_CQ_head].ROB_index].result.integer.wu = state->CQ[temp_CQ_head].result.integer.wu;// wrong
+                           invalid = 1;
+                         }
+                         else if (state->CQ[temp_CQ_head].tag1 != -1 && state->CQ[temp_CQ_head].tag2 == -1)
+                              store_invalid = 1;
+                         break;
+ 
+          case 0:
+                           if(state->CQ[temp_CQ_head].tag1 == -1) { 
+                              //issue_fu_mem(state->fu_mem_list, state->CQ[temp_CQ_head].ROB_index,  0, 0);  
+                              state->CQ[temp_CQ_head].issued = TRUE; 
+                              while (temp_CQ_tail != state->CQ_head + 1  && load_invalid == 0){
+                                    if (state->CQ[temp_CQ_tail].store == 1 && state->CQ[temp_CQ_tail].address.integer.wu == state->CQ[temp_CQ_head].address.integer.wu){
+                                       // if this store instruction has the result
+                                       // then forward this result to ROB_result coresponding to load
+                                       if (state->CQ[temp_CQ_tail].tag2 == -1){
+                                          state->ROB[state->CQ[temp_CQ_head].ROB_index].result.integer.wu = state->CQ[temp_CQ_tail].result.integer.wu; 
+                                       } 
+                                       load_invalid = 1;
+                                    }
+                                    temp_CQ_tail = (temp_CQ_tail - 1)%32;
+                              }
+                              // if no address matched store instruction was found 
+                              if(load_invalid == 0) { 
+                                     // load data from memory(ROB_target) into ROB_result. ROB_target available since tag1 == -1.
+                                     memcpy(&(state->ROB[state->CQ[temp_CQ_head].ROB_index].result.integer.wu), 
+                                             &(state->mem[state->ROB[state->CQ[temp_CQ_head].ROB_index].target.integer.wu]), 4);        
+                                     invalid = 1;
+                              }
+                              
+                           }
+                           break;
+          
+          default: break;  
+         } //switch  
+     temp_CQ_head = (temp_CQ_head + 1)%32;       
+   } //while 
+   
+  while (state->CQ[state->CQ_head].issued == TRUE){
+        state->CQ_head = (state->CQ_head + 1)%32; 
+  }
+  return 0;       
+}//func
+
+int
+issue(state_t *state) {
+   int temp_IQ_head = state->IQ_head;
+   int invalid = 0;
+   while (temp_IQ_head != state->IQ_tail + 1 && invalid == 0){  
+     int instr = state->IQ[temp_IQ_head].instr;
+     if (instr != 0){
+     int imm_d, DTG;
+     DTG = state->IQ[temp_IQ_head].ROB_index;
+     const op_info_t *op_info = decode_instr(instr, &imm_d);
+     operand_t operand1, operand2, result, target;
+
+     switch(op_info->fu_group_num){ 
+            case FU_GROUP_MEM:
+                 switch (op_info->operation){
+                      case OPERATION_LOAD:
+                      case OPERATION_STORE: 
+
+                                         if (state->IQ[temp_IQ_head].tag1 == -1 && state->IQ[temp_IQ_head].tag2 == -1){
+                                         if (issue_fu_int(state->fu_int_list, DTG, 0, 0) == -1){ 
+                                            break;
+                                         }
+                                         else{
+                                            operand1.integer.wu  = state->IQ[temp_IQ_head].operand1.integer.wu;
+                                            operand2.integer.wu  = state->IQ[temp_IQ_head].operand2.integer.wu;
+                                            state->IQ[temp_IQ_head].issued = TRUE;
+                                            state->ROB[state->IQ[temp_IQ_head].ROB_index].target.integer.wu = operand1.integer.wu + operand2.integer.wu;
+                                            temp_IQ_head = (temp_IQ_head + 1)%32;                                            
+                                            invalid = 1;
+                                            break;
+                                            }
+                                         }
+                           break;
+                 }                       
+                 break;
+            case FU_GROUP_INT:
+                 switch (imm_d){ 
+                        case 0:
+                        case 1:
+                          if (state->IQ[temp_IQ_head].tag1 == -1 && state->IQ[temp_IQ_head].tag2 == -1){         
+                              if (issue_fu_int(state->fu_int_list, DTG, 0, 0) == -1){
+                                 break;
+                              }
+                              else{
+                                 operand1.integer.wu  = state->IQ[temp_IQ_head].operand1.integer.wu;
+                                 operand2.integer.wu  = state->IQ[temp_IQ_head].operand2.integer.wu; 
+                                 state->IQ[temp_IQ_head].issued = TRUE;
+                                 result.integer.wu = perform_operation(instr, state->pc, operand1, operand2);
+                                 state->ROB[state->IQ[temp_IQ_head].ROB_index].result.integer.wu = result.integer.wu;
+                                 temp_IQ_head = (temp_IQ_head + 1)%32;
+                                 invalid = 1;
+                                 break;
+                              }
+                          }
+                          break; 
+                 }
+                 break;
+     }// switch
+     }// if
+   }// while
+}// function
+
+  
+int
+dispatch(state_t *state) {
+        int instr = (state->if_id).instr;
+        if (instr != 0){
+        
+        int imm_d;
+        const op_info_t *op_info = decode_instr(instr, &imm_d);
+        unsigned long pc_temp = state->if_id.pc;
+        if (state->fetch_lock == FALSE && (state->IQ_tail + 1)%32 != state->IQ_head && (state->CQ_tail + 1)%32 != state->CQ_head && 
+           (state->ROB_tail + 1)%64 != state->ROB_head){ 
+           switch(op_info->fu_group_num){ 
+                 case FU_GROUP_MEM:   
+                      switch(op_info->operation){  
+                            case OPERATION_LOAD:
+                                             state->ROB[state->ROB_tail].instr = instr;
+                                             state->ROB[state->ROB_tail].completed = FALSE;
+                                             state->rf_int.tag[FIELD_RD(instr)] = state->ROB_tail;
+                                             state->IQ[state->IQ_tail].instr = instr;
+                                             state->IQ[state->IQ_tail].pc = pc_temp;
+                                             state->IQ[state->IQ_tail].issued = FALSE;
+                                             state->IQ[state->IQ_tail].ROB_index = state->ROB_tail;
+                                             state->IQ[state->IQ_tail].tag1 = state->rf_int.tag[FIELD_RS1(instr)];
+                                             if (state->IQ[state->IQ_tail].tag1 == -1){
+                                                state->IQ[state->IQ_tail].operand1.integer.wu = state->rf_int.reg_int.integer[FIELD_RS1(instr)].wu;
+                                             }                                             
+                                             else { 
+                                                  // check the rob at tag1 and if completed is true bring the result in op1
+                                                  if (state->ROB[state->IQ[state->IQ_tail].tag1].completed == TRUE){ 
+                                                     state->IQ[state->IQ_tail].operand1.integer.wu = state->ROB[state->IQ[state->IQ_tail].tag1].result.integer.wu;
+						     state->IQ[state->IQ_tail].tag1 = -1;	   
+                                                  }                       
+                                             }
+                                             state->IQ[state->IQ_tail].tag2 = -1;
+                                             state->IQ[state->IQ_tail].operand2.integer.wu = FIELD_IMM_I(instr); 
+                                             state->IQ_tail = (state->IQ_tail + 1)%32;
+
+                                             state->CQ[state->CQ_tail].instr = instr;
+                                             state->CQ[state->CQ_tail].store = 0;
+                                             state->CQ[state->CQ_tail].issued = FALSE;
+                                             state->CQ[state->CQ_tail].ROB_index = state->ROB_tail;
+                                             state->CQ[state->CQ_tail].tag1 = state->ROB_tail + 64; // this can be anything not important
+                                             state->CQ[state->CQ_tail].tag2 = -1;
+                                             state->CQ_tail = (state->CQ_tail + 1)%32;
+
+                                             state->rf_int.tag[FIELD_RD(instr)] = state->ROB_tail;
+                                             state->ROB_tail = (state->ROB_tail + 1)%64;
+                                             break;
+                            case OPERATION_STORE:
+                                             state->ROB[state->ROB_tail].instr = instr;
+                                             state->ROB[state->ROB_tail].completed = FALSE;
+
+                                             state->IQ[state->IQ_tail].instr = instr;
+                                             state->IQ[state->IQ_tail].pc = pc_temp;
+                                             state->IQ[state->IQ_tail].issued = FALSE;
+                                             state->IQ[state->IQ_tail].ROB_index = state->ROB_tail;
+                                             state->IQ[state->IQ_tail].tag1 = state->rf_int.tag[FIELD_RS1(instr)];
+                                             if (state->IQ[state->IQ_tail].tag1 == -1){
+                                                state->IQ[state->IQ_tail].operand1.integer.wu = state->rf_int.reg_int.integer[FIELD_RS1(instr)].wu;
+                                             }
+                                             else {
+                                                // check the rob at tag1 and if completed is true bring the result in op1
+                                                  if (state->ROB[state->IQ[state->IQ_tail].tag1].completed == TRUE){
+                                                     state->IQ[state->IQ_tail].operand1.integer.wu = state->ROB[state->IQ[state->IQ_tail].tag1].result.integer.wu;
+                                                     state->IQ[state->IQ_tail].tag1 = -1;  
+                                                  }
+                                             }
+                                             state->IQ[state->IQ_tail].tag2 = -1;
+                                             state->IQ[state->IQ_tail].operand2.integer.wu = FIELD_IMM_S(instr);
+                                             state->IQ_tail = (state->IQ_tail + 1)%32;
+
+                                             state->CQ[state->CQ_tail].instr = instr;
+                                             state->CQ[state->CQ_tail].store = 1;
+                                             state->CQ[state->CQ_tail].issued = FALSE;
+                                             state->CQ[state->CQ_tail].ROB_index = state->ROB_tail;
+                                             state->CQ[state->CQ_tail].tag1 = state->ROB_tail + 64;
+                                             state->CQ[state->CQ_tail].tag2 = state->rf_int.tag[FIELD_RS2(instr)];
+                                             if (state->rf_int.tag[FIELD_RS2(instr)] == -1){
+                                                state->CQ[state->CQ_tail].result.integer.wu = state->rf_int.reg_int.integer[FIELD_RS2(instr)].wu;
+                                             }
+                                             else {
+                                                if (state->ROB[state->rf_int.tag[FIELD_RS2(instr)]].completed == TRUE){
+                                                   state->CQ[state->CQ_tail].result.integer.wu = state->ROB[state->CQ[state->CQ_tail].tag2].result.integer.wu; 
+                                                   state->CQ[state->CQ_tail].tag2 = -1;                      
+                                                }           
+                                             }
+                                             state->CQ_tail = (state->CQ_tail + 1)%32;
+ 
+                                             state->ROB_tail = (state->ROB_tail + 1)%64;
+                                             break;                  
+                      }
+                      break;                    
+                 case FU_GROUP_INT:
+                      switch(imm_d){ 
+                            case 0:   
+                                 state->ROB[state->ROB_tail].instr = instr;
+                                 state->ROB[state->ROB_tail].completed = FALSE;
+                                 state->rf_int.tag[FIELD_RD(instr)] = state->ROB_tail;
+                                 state->IQ[state->IQ_tail].instr = instr;
+                                 state->IQ[state->IQ_tail].pc = pc_temp;
+                                 state->IQ[state->IQ_tail].issued = FALSE;
+                                 state->IQ[state->IQ_tail].ROB_index = state->ROB_tail;
+                                 state->IQ[state->IQ_tail].tag1 = state->rf_int.tag[FIELD_RS1(instr)];
+                                 if (state->IQ[state->IQ_tail].tag1 == -1){
+                                    state->IQ[state->IQ_tail].operand1.integer.wu = state->rf_int.reg_int.integer[FIELD_RS1(instr)].wu;
+                                 }
+                                 else {
+                                 // check the rob at tag1 and if completed is true bring the result in op1 
+                                       if (state->ROB[state->rf_int.tag[FIELD_RS1(instr)]].completed == TRUE){
+                                           state->IQ[state->IQ_tail].operand1.integer.wu = state->ROB[state->IQ[state->IQ_tail].tag1].result.integer.wu;
+                                           state->IQ[state->IQ_tail].tag1 = -1;
+                                       }                                 
+                                 }
+                                 state->IQ[state->IQ_tail].tag2 = state->rf_int.tag[FIELD_RS2(instr)];
+                                 if (state->IQ[state->IQ_tail].tag2 == -1){
+                                    state->IQ[state->IQ_tail].operand2.integer.wu = state->rf_int.reg_int.integer[FIELD_RS2(instr)].wu;
+                                 }
+                                 else {
+                                 // check the rob at tag2 and if completed is true bring the result in op2
+                                       if (state->ROB[state->rf_int.tag[FIELD_RS2(instr)]].completed == TRUE){
+                                           state->IQ[state->IQ_tail].operand2.integer.wu = state->ROB[state->IQ[state->IQ_tail].tag2].result.integer.wu;
+                                           state->IQ[state->IQ_tail].tag2 = -1; 
+                                       }
+                                 }
+                                 state->IQ_tail = (state->IQ_tail + 1)%32;
+                                 state->ROB_tail = (state->ROB_tail + 1)%64;                      
+                                 break; 
+
+                            case 1: 
+                                 state->ROB[state->ROB_tail].instr = instr;
+                                 state->ROB[state->ROB_tail].completed = FALSE;
+                                 state->rf_int.tag[FIELD_RD(instr)] = state->ROB_tail;
+                                 state->IQ[state->IQ_tail].instr = instr;
+                                 state->IQ[state->IQ_tail].pc = pc_temp;
+                                 state->IQ[state->IQ_tail].issued = FALSE;
+                                 state->IQ[state->IQ_tail].ROB_index = state->ROB_tail;
+                                 state->IQ[state->IQ_tail].tag1 = state->rf_int.tag[FIELD_RS1(instr)];
+                                 if (state->IQ[state->IQ_tail].tag1 == -1){
+                                    state->IQ[state->IQ_tail].operand1.integer.wu = state->rf_int.reg_int.integer[FIELD_RS1(instr)].wu;
+                                 } 
+                                 else {
+                                    //check the rob at tag1 and if completed is true bring the result in op1
+                                       if (state->ROB[state->rf_int.tag[FIELD_RS1(instr)]].completed == TRUE){
+                                           state->IQ[state->IQ_tail].operand1.integer.wu = state->ROB[state->IQ[state->IQ_tail].tag1].result.integer.wu;
+                                           state->IQ[state->IQ_tail].tag1 = -1;  
+                                       }
+                                 } 
+                                 state->IQ[state->IQ_tail].tag2 = -1;
+                                 state->IQ[state->IQ_tail].operand2.integer.wu = FIELD_IMM_I(instr);
+
+                                 state->IQ_tail = (state->IQ_tail + 1)%32;
+                                 state->ROB_tail = (state->ROB_tail + 1)%64;
+                                 break; 
+                            }                             
+                      break;
+                 case FU_GROUP_HALT:                     
+                      state->ROB[state->ROB_tail].instr = instr;
+                      state->ROB[state->ROB_tail].completed = TRUE;
+                      state->ROB[state->ROB_tail].target.integer.wu = 0;
+                      state->ROB[state->ROB_tail].result.integer.wu = 0;
+                      state->ROB_tail = (state->ROB_tail + 1)%64;
+                      // set fetch_lock to false for remainder of the simulation. 
+                      break;
+
+                 default:
+                      break;              
+           }
+        
+        
+        }
+        else state->fetch_lock = TRUE; 
+        return 0;
+     }
+}
+void
+fetch(state_t *state) {
+     if (state->fetch_lock != TRUE){
+        state->if_id.pc = state->pc;
+        memcpy( &((state->if_id).instr), &(state->mem[state->pc]), 4);
+        state->pc += 4;
+    }   
+}
